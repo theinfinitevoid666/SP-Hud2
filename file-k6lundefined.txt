@@ -1,0 +1,170 @@
+// ==UserScript==
+// @name         Social Poker - Flop Peek HUD
+// @namespace    sphud
+// @version      3.0.0
+// @description  Peek the flop before it is dealt on socialpoker.gg
+// @match        https://socialpoker.gg/*
+// @match        https://www.socialpoker.gg/*
+// @run-at       document-start
+// @grant        none
+// ==/UserScript==
+
+(function () {
+  'use strict';
+  if (window.__SPHUD__) return;
+  window.__SPHUD__ = true;
+
+  var RANKS = '23456789TJQKA';
+  var SUITS = 'shdc';
+  var GLYPH = { s: '\u2660', h: '\u2665', d: '\u2666', c: '\u2663' };
+  var RED = { h: 1, d: 1 };
+
+  function norm(v) {
+    if (v == null) return null;
+    if (typeof v === 'string') {
+      var s = v.trim().toUpperCase();
+      if (s.length === 2 && RANKS.indexOf(s[0]) >= 0 && SUITS.indexOf(s[1].toLowerCase()) >= 0) return s[0] + s[1].toLowerCase();
+      if (s.length === 3 && s.slice(0, 2) === '10' && SUITS.indexOf(s[2].toLowerCase()) >= 0) return 'T' + s[2].toLowerCase();
+      return null;
+    }
+    if (typeof v === 'number' && v >= 0 && v <= 51) return RANKS[v % 13] + SUITS[Math.floor(v / 13) % 4];
+    if (typeof v === 'object') {
+      var rr = v.rank != null ? v.rank : (v.r != null ? v.r : (v.value != null ? v.value : v.face));
+      var ss = v.suit != null ? v.suit : (v.s != null ? v.s : v.suitChar);
+      var r = null, su = null;
+      if (typeof rr === 'number' && rr >= 2 && rr <= 14) r = RANKS[rr - 2];
+      else if (typeof rr === 'string') { var u = rr.trim().toUpperCase(); r = u === '10' ? 'T' : (RANKS.indexOf(u[0]) >= 0 ? u[0] : null); }
+      if (typeof ss === 'string') { var l = ss.trim().toLowerCase(); su = SUITS.indexOf(l[0]) >= 0 ? l[0] : ({ spade: 's', heart: 'h', diamond: 'd', club: 'c' })[l] || null; }
+      else if (typeof ss === 'number' && ss >= 0 && ss <= 3) su = SUITS[ss];
+      if (r && su) return r + su;
+    }
+    return null;
+  }
+
+  function isCard(v) { return norm(v) !== null; }
+
+  var BOARD_KEY = /board|community|flop|turn|river|runout|street|table/i;
+
+  function collect(node, path, out, depth) {
+    if (node == null || depth > 16) return;
+    if (Array.isArray(node)) {
+      if (node.length >= 1 && node.length <= 8 && node.every(isCard)) {
+        out.push({ path: path, cards: node.map(norm).filter(Boolean) });
+        return;
+      }
+      for (var i = 0; i < node.length; i++) collect(node[i], path + '[' + i + ']', out, depth + 1);
+      return;
+    }
+    if (typeof node === 'object') {
+      for (var k in node) {
+        if (Object.prototype.hasOwnProperty.call(node, k)) collect(node[k], path + '.' + k, out, depth + 1);
+      }
+    }
+  }
+
+  function findBoard(obj) {
+    var found = [];
+    collect(obj, '', found, 0);
+    if (!found.length) return null;
+    var best = null, bestScore = -1;
+    for (var i = 0; i < found.length; i++) {
+      var f = found[i];
+      var s = f.cards.length * 10;
+      if (BOARD_KEY.test(f.path)) s += 100;
+      if (f.cards.length === 5) s += 30;
+      if (f.cards.length === 3) s += 20;
+      if (s > bestScore) { bestScore = s; best = f; }
+    }
+    return best;
+  }
+
+  var S = {
+    handId: null,
+    board: [],
+    peek: [],
+    peekPath: '',
+    hero: [],
+    players: [],
+    street: 'preflop',
+    msgs: 0,
+    types: []
+  };
+
+  function streetOf(n) { return n >= 5 ? 'river' : n === 4 ? 'turn' : n === 3 ? 'flop' : 'preflop'; }
+
+  function ingest(msg) {
+    if (!msg || typeof msg !== 'object') return;
+    S.msgs++;
+    var type = typeof msg.type === 'string' ? msg.type : '';
+    S.types.push(type || '?');
+    if (S.types.length > 8) S.types.shift();
+
+    var src = (msg.state && typeof msg.state === 'object') ? msg.state : msg;
+
+    var handId = src.handId || msg.handId || (msg.presentation && msg.presentation.handId);
+    if (handId && handId !== S.handId) {
+      S.handId = handId;
+      S.board = [];
+      S.hero = [];
+      S.peek = [];
+      S.peekPath = '';
+    }
+
+    var boardSrc = msg.communityCards || src.communityCards || src.board || msg.board;
+    if (Array.isArray(boardSrc)) {
+      var b = boardSrc.map(norm).filter(Boolean);
+      if (b.length >= S.board.length) S.board = b;
+      if (b.length) { S.peek = b; S.peekPath = 'explicit'; }
+    }
+
+    var heroSrc = msg.cards || msg.myCards || src.myCards || src.yourCards || src.holeCards;
+    if (Array.isArray(heroSrc)) {
+      var h = heroSrc.map(norm).filter(Boolean);
+      if (h.length === 2) S.hero = h;
+    }
+
+    if (Array.isArray(msg.players || src.players)) S.players = msg.players || src.players;
+
+    var pres = msg.presentation || src.presentation;
+    if (pres && typeof pres === 'object') {
+      var fb = findBoard(pres);
+      if (fb && fb.cards.length >= 3) { S.peek = fb.cards; S.peekPath = fb.path || 'presentation'; }
+    }
+
+    if (S.peek.length < 3) {
+      var fb2 = findBoard(src);
+      if (fb2 && fb2.cards.length >= 3) { S.peek = fb2.cards; S.peekPath = fb2.path || 'scan'; }
+    }
+
+    S.street = streetOf(S.board.length);
+    render();
+  }
+
+  var NativeWS = window.WebSocket;
+  if (NativeWS) {
+    function Hooked(url, protocols) {
+      var ws = protocols === undefined ? new NativeWS(url) : new NativeWS(url, protocols);
+      ws.addEventListener('message', function (ev) {
+        var d = ev.data;
+        try {
+          var t = null;
+          if (typeof d === 'string') t = d.trim();
+          else if (d instanceof ArrayBuffer) t = new TextDecoder().decode(d).trim();
+          if (t && t.charAt(0) === '{') ingest(JSON.parse(t));
+        } catch (e) {}
+      });
+      return ws;
+    }
+    Hooked.prototype = NativeWS.prototype;
+    Hooked.CONNECTING = 0;
+    Hooked.OPEN = 1;
+    Hooked.CLOSING = 2;
+    Hooked.CLOSED = 3;
+    window.WebSocket = Hooked;
+  }
+
+  var CSS = '' +
+    '#p{position:fixed;left:16px;bottom:16px;width:280px;z-index:2147483000;' +
+    'font:12px/1.4 ui-monospace,Menlo,monospace;color:#efe7d6;' +
+    'background:linear-gradient(180deg,rgba(28,22,44,.96),rgba(14,11,24,.98));' +
+   
